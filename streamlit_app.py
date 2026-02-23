@@ -1,15 +1,39 @@
 import os
 import streamlit as st
 import json
+import io
+import csv
+from pathlib import Path
+from dotenv import load_dotenv
 
-from excel_storage import EXCEL_PATH, counts, get_recent_rows, get_all_rows
 from gemini_client import generate_text_with_gemini
 from main import fetch_for_post_urls, fetch_for_subreddits
 
+load_dotenv()
+
+
+def _get_secret(name: str, default: str = "") -> str:
+    # Streamlit Cloud secrets take priority; fallback to process env/.env.
+    # Avoid noisy local warnings when secrets.toml is not present.
+    secrets_candidates = [
+        Path.home() / ".streamlit" / "secrets.toml",
+        Path.cwd() / ".streamlit" / "secrets.toml",
+    ]
+    should_try_streamlit_secrets = any(p.exists() for p in secrets_candidates) or bool(
+        os.getenv("STREAMLIT_CLOUD")
+    )
+    if should_try_streamlit_secrets:
+        try:
+            val = st.secrets.get(name, None)
+            if val is not None and str(val).strip():
+                return str(val).strip()
+        except Exception:
+            pass
+    return os.getenv(name, default).strip()
 
 st.set_page_config(page_title="Reddit Pipeline", layout="wide")
 st.title("Reddit Pipeline Runner")
-st.caption("Scrape Reddit data, upload rendered cards to ImgBB, and store all results in Excel.")
+st.caption("Scrape Reddit data, upload rendered cards to ImgBB, and download CSV after each retrieval.")
 
 with st.sidebar:
     st.subheader("Scraping Safety Controls")
@@ -27,9 +51,9 @@ with st.sidebar:
     )
     st.warning("No scraper can guarantee zero blocking. Use conservative request rates.")
 
-imgbb_api_key = os.getenv("IMGBB_API_KEY", "")
-gemini_api_key = os.getenv("GEMINI_API_KEY", "")
-gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+imgbb_api_key = _get_secret("IMGBB_API_KEY")
+gemini_api_key = _get_secret("GEMINI_API_KEY")
+gemini_model = _get_secret("GEMINI_MODEL", "gemini-1.5-flash")
 
 if "last_results" not in st.session_state:
     st.session_state["last_results"] = []
@@ -39,6 +63,68 @@ if "script_source_links" not in st.session_state:
     st.session_state["script_source_links"] = []
 if "generated_by_post" not in st.session_state:
     st.session_state["generated_by_post"] = []
+if "last_csv_data" not in st.session_state:
+    st.session_state["last_csv_data"] = ""
+if "stored_rows" not in st.session_state:
+    st.session_state["stored_rows"] = []
+
+
+def _results_to_rows(results):
+    rows = []
+    for item in results or []:
+        post = item.get("post", {}) or {}
+        comments = item.get("comments", []) or []
+        comments_array = [
+            {
+                "comment_id": c.get("id"),
+                "author": c.get("author"),
+                "body": c.get("body"),
+                "ups": c.get("ups"),
+                "url": c.get("url"),
+                "created_utc": str(c.get("created_utc")) if c.get("created_utc") else None,
+            }
+            for c in comments
+        ]
+        row = {
+            "subreddit": post.get("subreddit"),
+            "post": f"post{post.get('post_rank')}" if post.get("post_rank") else "post",
+            "posted on": str(post.get("created_utc")) if post.get("created_utc") else None,
+            "author": post.get("author"),
+            "likes": post.get("ups"),
+            "Comments": len(comments),
+            "post_age_days": post.get("post_age_days"),
+            "post_flair": post.get("link_flair_text"),
+            "post_id": post.get("id"),
+            "post_title": post.get("title"),
+            "post_selftext": post.get("selftext"),
+            "post_url": item.get("post_url")
+            or (f"https://www.reddit.com/r/{post.get('subreddit')}/comments/{post.get('id')}/" if post.get("subreddit") and post.get("id") else None),
+            "post_upvote_ratio": post.get("upvote_ratio"),
+            "post_num_comments": post.get("num_comments"),
+            "post_rank": post.get("post_rank"),
+            "comment_id_array": json.dumps([c.get("comment_id") for c in comments_array], ensure_ascii=False),
+            "comment_author_array": json.dumps([c.get("author") for c in comments_array], ensure_ascii=False),
+            "comment_body_array": json.dumps([c.get("body") for c in comments_array], ensure_ascii=False),
+            "comment_ups_array": json.dumps([c.get("ups") for c in comments_array], ensure_ascii=False),
+            "comment_url_array": json.dumps([c.get("url") for c in comments_array], ensure_ascii=False),
+            "comment_created_utc_array": json.dumps([c.get("created_utc") for c in comments_array], ensure_ascii=False),
+            "comments_array": json.dumps(comments_array, ensure_ascii=False),
+            "imgbb_link": post.get("imgbb_link"),
+            "scraped_at_utc": post.get("scraped_at_utc"),
+        }
+        rows.append(row)
+    return rows
+
+
+def _rows_to_csv(rows):
+    if not rows:
+        return ""
+    headers = list(rows[0].keys())
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=headers)
+    writer.writeheader()
+    writer.writerows(rows)
+    return buf.getvalue()
 
 limits_col1, limits_col2 = st.columns(2)
 with limits_col1:
@@ -75,7 +161,7 @@ with tab_subs:
         if not subs:
             st.error("Provide at least one subreddit.")
         elif not imgbb_api_key.strip():
-            st.error("Missing `IMGBB_API_KEY` in environment (`.env`).")
+            st.error("Missing `IMGBB_API_KEY`. Set it in `.env` (local) or `st.secrets` / Streamlit Cloud Secrets.")
         else:
             with st.spinner("Fetching posts/comments from subreddit list..."):
                 results = fetch_for_subreddits(
@@ -85,7 +171,19 @@ with tab_subs:
                     imgbb_api_key=imgbb_api_key,
                 )
             st.session_state["last_results"] = results
-            st.success(f"Completed. Stored {len(results)} posts into {EXCEL_PATH}.")
+            rows = _results_to_rows(results)
+            st.session_state["stored_rows"].extend(rows)
+            st.session_state["last_csv_data"] = _rows_to_csv(rows)
+            st.success(f"Completed. Retrieved {len(results)} posts.")
+            if st.session_state["last_csv_data"]:
+                st.download_button(
+                    "Download Retrieved CSV",
+                    data=st.session_state["last_csv_data"],
+                    file_name="retrieved_posts_subreddits.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="download_csv_subs",
+                )
 
 with tab_urls:
     post_urls_text = st.text_area(
@@ -98,7 +196,7 @@ with tab_urls:
         if not post_urls:
             st.error("Provide at least one Reddit post URL.")
         elif not imgbb_api_key.strip():
-            st.error("Missing `IMGBB_API_KEY` in environment (`.env`).")
+            st.error("Missing `IMGBB_API_KEY`. Set it in `.env` (local) or `st.secrets` / Streamlit Cloud Secrets.")
         else:
             with st.spinner("Fetching post details from URL list..."):
                 results = fetch_for_post_urls(
@@ -107,7 +205,19 @@ with tab_urls:
                     imgbb_api_key=imgbb_api_key,
                 )
             st.session_state["last_results"] = results
-            st.success(f"Completed. Stored {len(results)} posts into {EXCEL_PATH}.")
+            rows = _results_to_rows(results)
+            st.session_state["stored_rows"].extend(rows)
+            st.session_state["last_csv_data"] = _rows_to_csv(rows)
+            st.success(f"Completed. Retrieved {len(results)} posts.")
+            if st.session_state["last_csv_data"]:
+                st.download_button(
+                    "Download Retrieved CSV",
+                    data=st.session_state["last_csv_data"],
+                    file_name="retrieved_posts_urls.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="download_csv_urls",
+                )
 
 with tab_script:
     st.subheader("Script Generator (Gemini)")
@@ -198,7 +308,7 @@ SCRIPT 1:
         help="Generate this many scripts for each selected post.",
     )
 
-    all_rows = get_all_rows()
+    all_rows = st.session_state.get("stored_rows", [])
     valid_rows = [
         r for r in all_rows
         if r.get("post_id") and (
@@ -378,7 +488,7 @@ if results:
                     st.markdown("---")
         with meta[1]:
             if post.get("imgbb_link"):
-                st.image(post.get("imgbb_link"), use_container_width=True)
+                st.image(post.get("imgbb_link"), use_column_width=True)
                 st.markdown(f"[Open ImgBB Link]({post.get('imgbb_link')})")
             else:
                 st.info("No ImgBB link available for this post.")
@@ -386,14 +496,29 @@ if results:
 else:
     st.info("No data fetched in this session yet.")
 
-st.subheader("Excel Snapshot")
-sheet_counts = counts()
-metrics = st.columns(len(sheet_counts))
-for i, (k, v) in enumerate(sheet_counts.items()):
-    metrics[i].metric(k, v)
-st.caption(f"Excel file path: {EXCEL_PATH}")
+st.subheader("Session Snapshot")
+stored_rows = st.session_state.get("stored_rows", [])
+total_comments = 0
+for r in stored_rows:
+    try:
+        arr = json.loads(r.get("comments_array") or "[]")
+        total_comments += len(arr) if isinstance(arr, list) else 0
+    except Exception:
+        pass
+metrics = st.columns(4)
+metrics[0].metric("rows", len(stored_rows))
+metrics[1].metric("subreddits", len({r.get("subreddit") for r in stored_rows if r.get("subreddit")}))
+metrics[2].metric("posts", len({r.get("post_id") for r in stored_rows if r.get("post_id")}))
+metrics[3].metric("comments", total_comments)
 
-recent = get_recent_rows(limit=30)
-if recent:
-    st.subheader("Recently Stored Rows")
-    st.dataframe(recent, use_container_width=True)
+if stored_rows:
+    st.subheader("Recently Retrieved Rows")
+    st.dataframe(stored_rows[-30:], use_container_width=True)
+    st.download_button(
+        "Download All Retrieved CSV (Session)",
+        data=_rows_to_csv(stored_rows),
+        file_name="retrieved_posts_session.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="download_csv_session_all",
+    )

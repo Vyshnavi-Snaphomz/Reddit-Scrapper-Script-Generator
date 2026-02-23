@@ -1,13 +1,17 @@
-import os
 import json
+import os
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
-from openpyxl import Workbook, load_workbook
+import gspread
+from google.oauth2.service_account import Credentials
 
 
-EXCEL_PATH = os.getenv("SCRAPED_EXCEL_PATH", "scraped_data.xlsx")
-SHEET_NAME = "scraped_data"
+SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "scraped_data")
+# Kept name for compatibility with existing imports/usages in app UI.
+EXCEL_PATH = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}" if SHEET_ID else "GOOGLE_SHEET_ID not set"
+
 HEADERS = [
     "subreddit",
     "post",
@@ -44,50 +48,56 @@ def _dt_to_iso(val):
     return val.isoformat() if val else None
 
 
-def _open_workbook():
-    if os.path.exists(EXCEL_PATH):
-        wb = load_workbook(EXCEL_PATH)
-    else:
-        wb = Workbook()
-
-    if SHEET_NAME in wb.sheetnames:
-        ws = wb[SHEET_NAME]
-    else:
-        ws = wb.active if wb.sheetnames else wb.create_sheet(SHEET_NAME)
-        ws.title = SHEET_NAME
-
-    if ws.max_row == 1 and ws.cell(row=1, column=1).value is None:
-        ws.delete_rows(1, 1)
-
-    if ws.max_row == 0:
-        ws.append(HEADERS)
-    else:
-        existing = [ws.cell(row=1, column=i).value for i in range(1, len(HEADERS) + 1)]
-        if existing != HEADERS:
-            for idx, header in enumerate(HEADERS, start=1):
-                ws.cell(row=1, column=idx, value=header)
-    return wb
+def _service_account_info() -> dict:
+    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if not raw:
+        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON in environment/secrets.")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON.") from e
 
 
-def _save_workbook(wb) -> None:
-    wb.save(EXCEL_PATH)
+def _worksheet():
+    if not SHEET_ID:
+        raise RuntimeError("Missing GOOGLE_SHEET_ID in environment/secrets.")
+
+    info = _service_account_info()
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(SHEET_ID)
+    try:
+        ws = sh.worksheet(WORKSHEET_NAME)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=len(HEADERS) + 5)
+    _ensure_headers(ws)
+    return ws
 
 
-def _sheet_rows_as_dicts(ws, headers: List[str]) -> List[Dict]:
-    rows = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not any(cell is not None for cell in row):
-            continue
-        rows.append({headers[i]: row[i] for i in range(len(headers))})
-    return rows
+def _ensure_headers(ws):
+    row1 = ws.row_values(1)
+    if row1 != HEADERS:
+        ws.update("A1", [HEADERS])
 
 
 def _append_rows(rows: Iterable[List]):
-    wb = _open_workbook()
-    ws = wb[SHEET_NAME]
-    for row in rows:
-        ws.append(row)
-    _save_workbook(wb)
+    ws = _worksheet()
+    rows = list(rows)
+    if not rows:
+        return
+    normalized = []
+    width = len(HEADERS)
+    for r in rows:
+        if len(r) < width:
+            r = r + [None] * (width - len(r))
+        elif len(r) > width:
+            r = r[:width]
+        normalized.append(r)
+    ws.append_rows(normalized, value_input_option="USER_ENTERED")
 
 
 def append_subreddit_block(
@@ -96,37 +106,33 @@ def append_subreddit_block(
     title: Optional[str] = None,
     description: Optional[str] = None,
 ) -> None:
-    # Keep this for compatibility; write a full-width row.
-    _append_rows(
-        [
-            [
-                subreddit,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                _now_iso(),
-            ]
-        ]
-    )
+    row = [
+        subreddit,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        _now_iso(),
+    ]
+    _append_rows([row])
 
 
 def append_post_comment_block(post: Dict, comments: Iterable[Dict], show_subreddit: bool) -> None:
@@ -181,7 +187,6 @@ def append_post_comment_block(post: Dict, comments: Iterable[Dict], show_subredd
 
 
 def append_post_row(post: Dict, post_rank: int) -> None:
-    # Backward compatibility no-op; writing happens with comments for sample layout.
     return None
 
 
@@ -208,20 +213,29 @@ def append_comments(subreddit: str, post_id: str, comments: Iterable[Dict]) -> N
 
 
 def _all_rows() -> List[Dict]:
-    wb = _open_workbook()
-    ws = wb[SHEET_NAME]
-    return _sheet_rows_as_dicts(ws, HEADERS)
+    ws = _worksheet()
+    values = ws.get_all_values()
+    if not values:
+        return []
+    headers = values[0]
+    rows = []
+    for raw in values[1:]:
+        if not any((cell or "").strip() for cell in raw):
+            continue
+        if len(raw) < len(headers):
+            raw = raw + [""] * (len(headers) - len(raw))
+        row = {headers[i]: raw[i] for i in range(len(headers))}
+        rows.append(row)
+    return rows
 
 
 def get_subreddits(query: Optional[str] = None) -> List[str]:
     rows = _all_rows()
-    out = []
     seen = set()
+    out = []
     for row in rows:
         subreddit = row.get("subreddit")
-        if not subreddit:
-            continue
-        if subreddit in seen:
+        if not subreddit or subreddit in seen:
             continue
         seen.add(subreddit)
         out.append(subreddit)

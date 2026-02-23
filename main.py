@@ -1,6 +1,5 @@
 import os
 
-from excel_storage import append_post_comment_block
 from fetch_comments import fetch_comments
 from fetch_post_url import fetch_post_from_url
 from fetch_posts import fetch_posts
@@ -32,7 +31,7 @@ def _store_post_and_upload(post, comments, show_subreddit, imgbb_api_key):
     except Exception:
         pass
 
-    append_post_comment_block(post, comments, show_subreddit=show_subreddit)
+    # No persistent sheet storage here; caller handles CSV/session storage.
     return post
 
 
@@ -85,14 +84,10 @@ def fetch_for_post_urls(post_urls, comments_per_post=3, imgbb_api_key=""):
 
 
 def run_pipeline(subreddits=None, posts_per_subreddit=5, comments_per_post=3):
-    # Lazy import so Streamlit deployment does not pull extra optional deps on startup.
-    from fetch_subreddits import get_related_subreddits, get_subreddits_from_excel
-
     if subreddits:
         related_subreddits = [s.strip() for s in subreddits if s and s.strip()]
     else:
-        get_related_subreddits()
-        related_subreddits = get_subreddits_from_excel()
+        related_subreddits = []
     print("Loaded subreddits:", related_subreddits)
 
     fetch_for_subreddits(
@@ -100,7 +95,7 @@ def run_pipeline(subreddits=None, posts_per_subreddit=5, comments_per_post=3):
         posts_per_subreddit=posts_per_subreddit,
         comments_per_post=comments_per_post,
     )
-    print("\nPipeline complete! Scraped data is stored in Excel.")
+    print("\nPipeline complete! Use CSV download from Streamlit.")
 
 
 if __name__ == "__main__":
