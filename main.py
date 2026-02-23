@@ -4,7 +4,6 @@ from excel_storage import append_post_comment_block
 from fetch_comments import fetch_comments
 from fetch_post_url import fetch_post_from_url
 from fetch_posts import fetch_posts
-from fetch_subreddits import get_related_subreddits, get_subreddits_from_excel
 from html_export import export_post_assets
 from imgbb_client import upload_image_to_imgbb
 
@@ -86,6 +85,9 @@ def fetch_for_post_urls(post_urls, comments_per_post=3, imgbb_api_key=""):
 
 
 def run_pipeline(subreddits=None, posts_per_subreddit=5, comments_per_post=3):
+    # Lazy import so Streamlit deployment does not pull extra optional deps on startup.
+    from fetch_subreddits import get_related_subreddits, get_subreddits_from_excel
+
     if subreddits:
         related_subreddits = [s.strip() for s in subreddits if s and s.strip()]
     else:
