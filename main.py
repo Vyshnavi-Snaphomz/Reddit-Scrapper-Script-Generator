@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 
 from fetch_comments import fetch_comments
 from fetch_post_url import fetch_post_from_url
@@ -21,6 +22,9 @@ def _store_post_and_upload(post, comments, show_subreddit, imgbb_api_key):
             print(f"   -> ImgBB upload failed: {e}")
     else:
         post["imgbb_link"] = None
+
+    # Always stamp retrieval time for storage and script-generation traceability.
+    post["scraped_at_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # Temporary artifacts are deleted after upload.
     try:

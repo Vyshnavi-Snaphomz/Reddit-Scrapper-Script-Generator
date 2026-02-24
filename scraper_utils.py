@@ -6,10 +6,12 @@ from typing import Any
 import requests
 
 
-DEFAULT_HEADERS = {
-    "User-Agent": os.getenv("REDDIT_USER_AGENT", "snapreddit-bot/1.0 (contact: admin@example.com)"),
-    "Accept": "application/json",
-}
+def _request_headers() -> dict:
+    # Build headers at call time so deployed secrets/env updates are always respected.
+    return {
+        "User-Agent": os.getenv("REDDIT_USER_AGENT", "snapreddit-bot/1.0 (contact: admin@example.com)"),
+        "Accept": "application/json",
+    }
 
 
 def _sleep_between_requests() -> None:
@@ -27,12 +29,14 @@ def safe_get_json(url: str, timeout: int = 25) -> Any:
     """
     retries = int(os.getenv("SCRAPE_MAX_RETRIES", "4"))
     backoff = float(os.getenv("SCRAPE_BACKOFF_BASE_SEC", "1.5"))
+    if "reddit.com" in url and "raw_json=1" not in url:
+        url = f"{url}{'&' if '?' in url else '?'}raw_json=1"
 
     last_error = None
     for attempt in range(retries):
         _sleep_between_requests()
         try:
-            response = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
+            response = requests.get(url, headers=_request_headers(), timeout=timeout)
             if response.status_code == 200:
                 return response.json()
             if response.status_code in (429, 500, 502, 503, 504):

@@ -59,10 +59,13 @@ with st.sidebar:
 imgbb_api_key = _get_secret("IMGBB_API_KEY")
 gemini_api_key = _get_secret("GEMINI_API_KEY")
 gemini_model = _get_secret("GEMINI_MODEL", "gemini-1.5-flash")
+reddit_user_agent = _get_secret("REDDIT_USER_AGENT", "snapreddit-bot/1.0")
 google_sheet_id = _get_secret("GOOGLE_SHEET_ID")
 google_worksheet_name = _get_secret("GOOGLE_WORKSHEET_NAME", "scraped_data")
 google_service_account_json = _get_secret("GOOGLE_SERVICE_ACCOUNT_JSON")
 
+if reddit_user_agent:
+    os.environ["REDDIT_USER_AGENT"] = reddit_user_agent
 if google_sheet_id:
     os.environ["GOOGLE_SHEET_ID"] = google_sheet_id
 if google_worksheet_name:
@@ -231,6 +234,11 @@ with tab_subs:
                 except Exception as e:
                     st.warning(f"Could not save to Google Sheets: {e}")
             st.success(f"Done. Retrieved {len(results)} posts.")
+            if not results:
+                st.warning(
+                    "Retrieved 0 posts. Possible causes: subreddit has mostly filtered posts, "
+                    "temporary Reddit rate-limit/block, or request header issues in deployment."
+                )
 
 with tab_urls:
     post_urls_text = st.text_area(
@@ -261,6 +269,11 @@ with tab_urls:
                 except Exception as e:
                     st.warning(f"Could not save to Google Sheets: {e}")
             st.success(f"Done. Retrieved {len(results)} posts.")
+            if not results:
+                st.warning(
+                    "Retrieved 0 posts. Possible causes: URL unavailable, temporary Reddit rate-limit/block, "
+                    "or excluded/filtered post."
+                )
 
 with tab_script:
     header_col1, header_col2 = st.columns([4, 1])
