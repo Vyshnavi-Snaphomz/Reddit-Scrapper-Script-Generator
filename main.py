@@ -31,7 +31,7 @@ def _store_post_and_upload(post, comments, show_subreddit, imgbb_api_key):
     except Exception:
         pass
 
-    # No persistent sheet storage here; caller handles CSV/session storage.
+    # No persistent storage here; caller handles Google Sheets/session storage.
     return post
 
 
@@ -64,7 +64,7 @@ def fetch_for_subreddits(
 
 
 def fetch_for_post_urls(post_urls, comments_per_post=3, imgbb_api_key=""):
-    """Fetch from direct Reddit post links and store output in Excel."""
+    """Fetch from direct Reddit post links and return collected post/comment data."""
     collected = []
     for idx, post_url in enumerate(post_urls, start=1):
         post = fetch_post_from_url(post_url)
@@ -95,7 +95,7 @@ def run_pipeline(subreddits=None, posts_per_subreddit=5, comments_per_post=3):
         posts_per_subreddit=posts_per_subreddit,
         comments_per_post=comments_per_post,
     )
-    print("\nPipeline complete! Use CSV download from Streamlit.")
+    print("\nPipeline complete!")
 
 
 if __name__ == "__main__":

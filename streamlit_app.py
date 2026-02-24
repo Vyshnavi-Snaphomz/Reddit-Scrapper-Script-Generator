@@ -1,8 +1,7 @@
 import os
 import streamlit as st
 import json
-import io
-import csv
+import importlib
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -33,7 +32,13 @@ def _get_secret(name: str, default: str = "") -> str:
 
 st.set_page_config(page_title="Reddit Pipeline", layout="wide")
 st.title("Reddit Pipeline Runner")
-st.caption("Scrape Reddit data, upload rendered cards to ImgBB, and download CSV after each retrieval.")
+st.caption("Collect Reddit posts, save them to Google Sheets, and generate ready-to-use scripts.")
+with st.expander("How it works", expanded=True):
+    st.markdown(
+        "1. Collect data from subreddits or links.\n"
+        "2. Refresh saved data from Google Sheets.\n"
+        "3. Generate scripts from saved posts."
+    )
 
 with st.sidebar:
     st.subheader("Scraping Safety Controls")
@@ -54,6 +59,31 @@ with st.sidebar:
 imgbb_api_key = _get_secret("IMGBB_API_KEY")
 gemini_api_key = _get_secret("GEMINI_API_KEY")
 gemini_model = _get_secret("GEMINI_MODEL", "gemini-1.5-flash")
+google_sheet_id = _get_secret("GOOGLE_SHEET_ID")
+google_worksheet_name = _get_secret("GOOGLE_WORKSHEET_NAME", "scraped_data")
+google_service_account_json = _get_secret("GOOGLE_SERVICE_ACCOUNT_JSON")
+
+if google_sheet_id:
+    os.environ["GOOGLE_SHEET_ID"] = google_sheet_id
+if google_worksheet_name:
+    os.environ["GOOGLE_WORKSHEET_NAME"] = google_worksheet_name
+if google_service_account_json:
+    os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"] = google_service_account_json
+
+sheet_storage = None
+sheet_init_error = ""
+try:
+    import excel_storage as _sheet_storage
+    sheet_storage = importlib.reload(_sheet_storage)
+except Exception as e:
+    sheet_init_error = str(e)
+
+with st.sidebar:
+    st.subheader("Storage")
+    if google_sheet_id and google_service_account_json and sheet_storage:
+        st.success("Google Sheets connected")
+    else:
+        st.info("Using session-only storage (configure Google Sheets for persistence).")
 
 if "last_results" not in st.session_state:
     st.session_state["last_results"] = []
@@ -63,10 +93,17 @@ if "script_source_links" not in st.session_state:
     st.session_state["script_source_links"] = []
 if "generated_by_post" not in st.session_state:
     st.session_state["generated_by_post"] = []
-if "last_csv_data" not in st.session_state:
-    st.session_state["last_csv_data"] = ""
 if "stored_rows" not in st.session_state:
     st.session_state["stored_rows"] = []
+if "sheet_bootstrap_done" not in st.session_state:
+    st.session_state["sheet_bootstrap_done"] = False
+
+
+def _load_rows_from_google_sheet():
+    if not sheet_storage:
+        return [], "Google Sheets storage module unavailable."
+    rows = sheet_storage.get_all_rows()
+    return rows, ""
 
 
 def _results_to_rows(results):
@@ -116,35 +153,49 @@ def _results_to_rows(results):
     return rows
 
 
-def _rows_to_csv(rows):
-    if not rows:
-        return ""
-    headers = list(rows[0].keys())
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=headers)
-    writer.writeheader()
-    writer.writerows(rows)
-    return buf.getvalue()
+if not st.session_state.get("sheet_bootstrap_done", False):
+    st.session_state["sheet_bootstrap_done"] = True
+    can_bootstrap = bool(google_sheet_id and google_service_account_json and sheet_storage)
+    if can_bootstrap:
+        try:
+            initial_rows, err = _load_rows_from_google_sheet()
+            if err:
+                st.warning(f"Google Sheets load skipped: {err}")
+            else:
+                st.session_state["stored_rows"] = initial_rows
+                if initial_rows:
+                    st.info(f"Loaded {len(initial_rows)} existing rows from Google Sheets.")
+        except Exception as e:
+            st.warning(f"Google Sheets initial load failed: {e}")
+    elif sheet_init_error:
+        st.warning(f"Google Sheets integration unavailable: {sheet_init_error}")
 
-limits_col1, limits_col2 = st.columns(2)
-with limits_col1:
-    posts_per_subreddit = st.number_input(
-        "Posts per subreddit",
-        min_value=1,
-        max_value=25,
-        value=5,
-        step=1,
-    )
-with limits_col2:
-    comments_per_post = st.number_input(
-        "Comments per post",
-        min_value=1,
-        max_value=20,
-        value=3,
-        step=1,
-    )
+stored_rows = st.session_state.get("stored_rows", [])
+status_col1, status_col2, status_col3 = st.columns(3)
+status_col1.metric("Google Sheets", "Connected" if (google_sheet_id and google_service_account_json and sheet_storage) else "Not Connected")
+status_col2.metric("Saved Posts", len({r.get("post_id") for r in stored_rows if r.get("post_id")}))
+status_col3.metric("Ready to Generate", "Yes" if len(stored_rows) > 0 else "No")
 
-tab_subs, tab_urls, tab_script = st.tabs(["Subreddit List", "Post URL", "Generate Script"])
+with st.expander("Advanced settings"):
+    limits_col1, limits_col2 = st.columns(2)
+    with limits_col1:
+        posts_per_subreddit = st.number_input(
+            "Posts per subreddit",
+            min_value=1,
+            max_value=25,
+            value=5,
+            step=1,
+        )
+    with limits_col2:
+        comments_per_post = st.number_input(
+            "Top comments to include",
+            min_value=1,
+            max_value=20,
+            value=3,
+            step=1,
+        )
+
+tab_subs, tab_urls, tab_script = st.tabs(["Collect from Subreddits", "Collect from Links", "Create Scripts"])
 
 with tab_subs:
     default_subreddits = "\n".join(
@@ -159,9 +210,9 @@ with tab_subs:
     if st.button("Fetch from Subreddits", use_container_width=True):
         subs = [s.strip() for s in manual_subreddits.replace(",", "\n").splitlines() if s.strip()]
         if not subs:
-            st.error("Provide at least one subreddit.")
+            st.error("Please enter at least one subreddit.")
         elif not imgbb_api_key.strip():
-            st.error("Missing `IMGBB_API_KEY`. Set it in `.env` (local) or `st.secrets` / Streamlit Cloud Secrets.")
+            st.error("Missing ImgBB key. Add `IMGBB_API_KEY` in your app secrets.")
         else:
             with st.spinner("Fetching posts/comments from subreddit list..."):
                 results = fetch_for_subreddits(
@@ -173,17 +224,13 @@ with tab_subs:
             st.session_state["last_results"] = results
             rows = _results_to_rows(results)
             st.session_state["stored_rows"].extend(rows)
-            st.session_state["last_csv_data"] = _rows_to_csv(rows)
-            st.success(f"Completed. Retrieved {len(results)} posts.")
-            if st.session_state["last_csv_data"]:
-                st.download_button(
-                    "Download Retrieved CSV",
-                    data=st.session_state["last_csv_data"],
-                    file_name="retrieved_posts_subreddits.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                    key="download_csv_subs",
-                )
+            if rows and google_sheet_id and google_service_account_json and sheet_storage:
+                try:
+                    sheet_storage.append_rows(rows)
+                    st.info(f"Saved {len(rows)} rows to Google Sheets.")
+                except Exception as e:
+                    st.warning(f"Could not save to Google Sheets: {e}")
+            st.success(f"Done. Retrieved {len(results)} posts.")
 
 with tab_urls:
     post_urls_text = st.text_area(
@@ -194,9 +241,9 @@ with tab_urls:
     if st.button("Fetch from Post URLs", use_container_width=True):
         post_urls = [u.strip() for u in post_urls_text.splitlines() if u.strip()]
         if not post_urls:
-            st.error("Provide at least one Reddit post URL.")
+            st.error("Please enter at least one Reddit post URL.")
         elif not imgbb_api_key.strip():
-            st.error("Missing `IMGBB_API_KEY`. Set it in `.env` (local) or `st.secrets` / Streamlit Cloud Secrets.")
+            st.error("Missing ImgBB key. Add `IMGBB_API_KEY` in your app secrets.")
         else:
             with st.spinner("Fetching post details from URL list..."):
                 results = fetch_for_post_urls(
@@ -207,20 +254,32 @@ with tab_urls:
             st.session_state["last_results"] = results
             rows = _results_to_rows(results)
             st.session_state["stored_rows"].extend(rows)
-            st.session_state["last_csv_data"] = _rows_to_csv(rows)
-            st.success(f"Completed. Retrieved {len(results)} posts.")
-            if st.session_state["last_csv_data"]:
-                st.download_button(
-                    "Download Retrieved CSV",
-                    data=st.session_state["last_csv_data"],
-                    file_name="retrieved_posts_urls.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                    key="download_csv_urls",
-                )
+            if rows and google_sheet_id and google_service_account_json and sheet_storage:
+                try:
+                    sheet_storage.append_rows(rows)
+                    st.info(f"Saved {len(rows)} rows to Google Sheets.")
+                except Exception as e:
+                    st.warning(f"Could not save to Google Sheets: {e}")
+            st.success(f"Done. Retrieved {len(results)} posts.")
 
 with tab_script:
-    st.subheader("Script Generator (Gemini)")
+    header_col1, header_col2 = st.columns([4, 1])
+    with header_col1:
+        st.subheader("Script Generator (Gemini)")
+    with header_col2:
+        if st.button("Refresh from Google Sheets", use_container_width=True):
+            if not (google_sheet_id and google_service_account_json and sheet_storage):
+                st.error("Google Sheets is not configured yet. Add `GOOGLE_SHEET_ID` and `GOOGLE_SERVICE_ACCOUNT_JSON`.")
+            else:
+                try:
+                    fetched_rows, err = _load_rows_from_google_sheet()
+                    if err:
+                        st.error(err)
+                    else:
+                        st.session_state["stored_rows"] = fetched_rows
+                        st.success(f"Loaded {len(fetched_rows)} rows from Google Sheets.")
+                except Exception as e:
+                    st.error(f"Failed to load rows from Google Sheets: {e}")
     default_prompt = """You are my Snaphomz CMO + Apple-level Creative Director + Short-form Scriptwriter.
 
 Generate Instagram Reel scripts from ONLY this data:
@@ -270,7 +329,7 @@ USE THE PROVIDED FIELDS INTELLIGENTLY (MUST)
 SAFETY + ACCURACY (MUST)
 11) No legal/financial advice.
     - Use safe language: “generally,” “often,” “a good starting point,” “depends,” “for your situation.”
-    - If the CSV doesn’t support a claim, don’t invent it. Keep it general and say what to check next.
+    - If the dataset doesn’t support a claim, don’t invent it. Keep it general and say what to check next.
 12) Privacy:
     - Never include "author" or "comment_author" names.
     - Never include direct links in the script (no "post_url" or "comment_url" spoken aloud).
@@ -298,16 +357,6 @@ SCRIPT 1:
 [body]
 """
 
-    prompt_text = st.text_area("Prompt", value=default_prompt, height=220, key="prompt_text")
-    scripts_per_post = st.number_input(
-        "Scripts per post",
-        min_value=1,
-        max_value=12,
-        value=6,
-        step=1,
-        help="Generate this many scripts for each selected post.",
-    )
-
     all_rows = st.session_state.get("stored_rows", [])
     valid_rows = [
         r for r in all_rows
@@ -317,47 +366,90 @@ SCRIPT 1:
             or (r.get("comments_array") or "").strip()
         )
     ]
-    st.caption(f"Valid content rows available: {len(valid_rows)}")
+    st.caption(f"Saved posts available for script generation: {len(valid_rows)}")
 
-    mode = st.radio(
-        "Selection Mode",
-        ["Single Row", "Row Range"],
-        horizontal=True,
-    )
+    top_controls_col1, top_controls_col2 = st.columns([1, 2])
+    with top_controls_col1:
+        scripts_per_post = st.number_input(
+            "Scripts per post",
+            min_value=1,
+            max_value=12,
+            value=6,
+            step=1,
+            help="Generate this many scripts for each selected post.",
+        )
+    with top_controls_col2:
+        selection_method = st.selectbox(
+            "How do you want to choose posts?",
+            ["Latest saved posts", "Pick by title", "Advanced (row-based)"],
+            index=0,
+        )
 
     selected_rows = []
-    if mode == "Single Row":
-        target_row_number = st.number_input(
-            "Content row number (1-based)",
+    if selection_method == "Latest saved posts":
+        latest_count = st.number_input(
+            "How many latest posts?",
             min_value=1,
             max_value=max(1, len(valid_rows)),
-            value=min(15, max(1, len(valid_rows))),
+            value=min(1, max(1, len(valid_rows))),
             step=1,
         )
         if valid_rows:
-            selected_rows = [valid_rows[int(target_row_number) - 1]]
+            selected_rows = valid_rows[-int(latest_count):]
+
+    elif selection_method == "Pick by title":
+        option_labels = []
+        for idx, row in enumerate(valid_rows, start=1):
+            title = (row.get("post_title") or "Untitled").strip()
+            if len(title) > 85:
+                title = f"{title[:82]}..."
+            subreddit = row.get("subreddit") or "unknown"
+            option_labels.append(f"#{idx} | r/{subreddit} | {title}")
+
+        selected_labels = st.multiselect(
+            "Choose saved posts",
+            options=option_labels,
+            default=option_labels[-1:] if option_labels else [],
+        )
+        label_to_index = {label: i for i, label in enumerate(option_labels)}
+        selected_rows = [valid_rows[label_to_index[label]] for label in selected_labels]
+
     else:
-        c1, c2 = st.columns(2)
-        with c1:
-            start_row = st.number_input(
-                "Start row",
+        mode = st.radio("Advanced mode", ["Single Row", "Row Range"], horizontal=True)
+        if mode == "Single Row":
+            target_row_number = st.number_input(
+                "Which saved post to use",
                 min_value=1,
                 max_value=max(1, len(valid_rows)),
-                value=1,
+                value=min(15, max(1, len(valid_rows))),
                 step=1,
             )
-        with c2:
-            end_row = st.number_input(
-                "End row",
-                min_value=1,
-                max_value=max(1, len(valid_rows)),
-                value=min(10, max(1, len(valid_rows))),
-                step=1,
-            )
-        if valid_rows:
-            s = min(int(start_row), int(end_row))
-            e = max(int(start_row), int(end_row))
-            selected_rows = valid_rows[s - 1 : e]
+            if valid_rows:
+                selected_rows = [valid_rows[int(target_row_number) - 1]]
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                start_row = st.number_input(
+                    "Start row",
+                    min_value=1,
+                    max_value=max(1, len(valid_rows)),
+                    value=1,
+                    step=1,
+                )
+            with c2:
+                end_row = st.number_input(
+                    "End row",
+                    min_value=1,
+                    max_value=max(1, len(valid_rows)),
+                    value=min(10, max(1, len(valid_rows))),
+                    step=1,
+                )
+            if valid_rows:
+                s = min(int(start_row), int(end_row))
+                e = max(int(start_row), int(end_row))
+                selected_rows = valid_rows[s - 1 : e]
+
+    st.caption(f"Selected posts: {len(selected_rows)}")
 
     # Keep only required fields for Gemini input.
     llm_rows = [
@@ -376,9 +468,9 @@ SCRIPT 1:
 
     if st.button("Generate Scripts", use_container_width=True, key="generate_scripts"):
         if not gemini_api_key.strip():
-            st.error("Missing `GEMINI_API_KEY` in environment (`.env`).")
+            st.error("Missing Gemini key. Add `GEMINI_API_KEY` in your app secrets.")
         elif not llm_rows:
-            st.error("No valid rows selected.")
+            st.error("No saved content selected. Fetch data first, then refresh from Google Sheets.")
         else:
             generated_blocks = []
             progress = st.progress(0, text="Generating scripts...")
@@ -392,7 +484,7 @@ SCRIPT 1:
                     "comments_array": row.get("comments_array"),
                 }
                 row_prompt = (
-                    f"{prompt_text}\n\n"
+                    f"{default_prompt}\n\n"
                     f"Generate exactly {int(scripts_per_post)} scripts for this post.\n\n"
                     "DATASET (JSON):\n"
                     f"{json.dumps([llm_row], ensure_ascii=False, indent=2)}\n\n"
@@ -482,10 +574,12 @@ if results:
             if post.get("selftext"):
                 st.write(post.get("selftext")[:600] + ("..." if len(post.get("selftext", "")) > 600 else ""))
             with st.expander(f"Top retrieved comments ({len(comments)})"):
-                for idx, c in enumerate(comments, start=1):
+                for idx, c in enumerate(comments[:2], start=1):
                     st.markdown(f"**{idx}. u/{c.get('author','unknown')}** ({c.get('ups',0)} ups)")
                     st.write(c.get("body", ""))
                     st.markdown("---")
+                if len(comments) > 2:
+                    st.caption(f"Showing 2 of {len(comments)} comments.")
         with meta[1]:
             if post.get("imgbb_link"):
                 st.image(post.get("imgbb_link"), use_column_width=True)
@@ -494,7 +588,7 @@ if results:
                 st.info("No ImgBB link available for this post.")
         st.markdown("---")
 else:
-    st.info("No data fetched in this session yet.")
+    st.info("No new retrieval in this session yet. Use a Collect tab to fetch posts.")
 
 st.subheader("Session Snapshot")
 stored_rows = st.session_state.get("stored_rows", [])
@@ -514,11 +608,5 @@ metrics[3].metric("comments", total_comments)
 if stored_rows:
     st.subheader("Recently Retrieved Rows")
     st.dataframe(stored_rows[-30:], use_container_width=True)
-    st.download_button(
-        "Download All Retrieved CSV (Session)",
-        data=_rows_to_csv(stored_rows),
-        file_name="retrieved_posts_session.csv",
-        mime="text/csv",
-        use_container_width=True,
-        key="download_csv_session_all",
-    )
+else:
+    st.info("No saved rows yet. Collect posts first to build your script library.")

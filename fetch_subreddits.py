@@ -21,8 +21,8 @@ def _basic_realestate_filter(text: str) -> bool:
     return any(k in text_l for k in keywords)
 
 
-def get_related_subreddits(query="realestate", limit=11, save_to_excel=True):
-    """Fetch related subreddits and store only US real-estate ones in Excel."""
+def get_related_subreddits(query="realestate", limit=11, save_to_sheet=True):
+    """Fetch related subreddits and store only US real-estate ones in Google Sheets."""
     url = f"https://www.reddit.com/subreddits/search.json?q={query}&limit={limit}"
     try:
         data = safe_get_json(url)
@@ -51,20 +51,20 @@ def get_related_subreddits(query="realestate", limit=11, save_to_excel=True):
                 }
             )
 
-    if save_to_excel and subreddit_records:
+    if save_to_sheet and subreddit_records:
         append_subreddits(subreddit_records)
 
     return subreddits
 
 
-def get_subreddits_from_excel(query=None):
-    """Fetch stored subreddits from Excel."""
+def get_subreddits_from_sheet(query=None):
+    """Fetch stored subreddits from Google Sheets."""
     return get_subreddits(query=query)
 
 
 # Backward compatible alias for existing imports.
 def get_subreddits_from_db(query=None):
-    return get_subreddits_from_excel(query=query)
+    return get_subreddits_from_sheet(query=query)
 
 
 if __name__ == "__main__":

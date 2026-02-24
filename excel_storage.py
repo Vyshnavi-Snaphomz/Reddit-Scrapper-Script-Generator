@@ -100,6 +100,16 @@ def _append_rows(rows: Iterable[List]):
     ws.append_rows(normalized, value_input_option="USER_ENTERED")
 
 
+def append_rows(rows: Iterable[Dict]) -> None:
+    rows = list(rows or [])
+    if not rows:
+        return
+    as_lists = []
+    for row in rows:
+        as_lists.append([row.get(h) for h in HEADERS])
+    _append_rows(as_lists)
+
+
 def append_subreddit_block(
     subreddit: str,
     query: Optional[str] = None,
