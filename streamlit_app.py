@@ -235,7 +235,7 @@ with tab_subs:
 with tab_urls:
     post_urls_text = st.text_area(
         "Post links (one per line)",
-        value="https://www.reddit.com/r/RealEstate/comments/1rc6cty/advice_regarding_a_realtor/",
+        value="https://www.reddit.com/r/RealEstate/comments/1rdg7v8/why_are_we_still_giving_agents_5/",
         height=140,
     )
     if st.button("Fetch from Post URLs", use_container_width=True):
