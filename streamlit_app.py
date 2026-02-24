@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from gemini_client import generate_text_with_gemini
 from main import fetch_for_post_urls, fetch_for_subreddits
+from scraper_utils import get_fetch_trace
 
 load_dotenv()
 
@@ -239,6 +240,10 @@ with tab_subs:
                     "Retrieved 0 posts. Possible causes: subreddit has mostly filtered posts, "
                     "temporary Reddit rate-limit/block, or request header issues in deployment."
                 )
+                trace = get_fetch_trace(clear=False)
+                if trace:
+                    with st.expander("Fetch diagnostics (backend request trace)"):
+                        st.code("\n".join(trace[-20:]))
 
 with tab_urls:
     post_urls_text = st.text_area(
@@ -274,6 +279,10 @@ with tab_urls:
                     "Retrieved 0 posts. Possible causes: URL unavailable, temporary Reddit rate-limit/block, "
                     "or excluded/filtered post."
                 )
+                trace = get_fetch_trace(clear=False)
+                if trace:
+                    with st.expander("Fetch diagnostics (backend request trace)"):
+                        st.code("\n".join(trace[-20:]))
 
 with tab_script:
     header_col1, header_col2 = st.columns([4, 1])

@@ -7,6 +7,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import requests
 
 
+_FETCH_TRACE = []
+
+
 def _request_headers() -> dict:
     # Build headers at call time so deployed secrets/env updates are always respected.
     return {
@@ -49,6 +52,20 @@ def _reddit_variants(url: str) -> list:
     return list(dict.fromkeys(out))
 
 
+def _trace(msg: str) -> None:
+    _FETCH_TRACE.append(msg)
+    # Keep bounded memory for long-running Streamlit sessions.
+    if len(_FETCH_TRACE) > 200:
+        del _FETCH_TRACE[:100]
+
+
+def get_fetch_trace(clear: bool = False) -> list:
+    data = list(_FETCH_TRACE)
+    if clear:
+        _FETCH_TRACE.clear()
+    return data
+
+
 def safe_get_json(url: str, timeout: int = 25) -> Any:
     """
     Request JSON with rate limiting, retry, and exponential backoff.
@@ -57,6 +74,7 @@ def safe_get_json(url: str, timeout: int = 25) -> Any:
     retries = int(os.getenv("SCRAPE_MAX_RETRIES", "4"))
     backoff = float(os.getenv("SCRAPE_BACKOFF_BASE_SEC", "1.5"))
     candidate_urls = _reddit_variants(url)
+    _trace(f"safe_get_json start: {url}")
 
     last_error = None
     for attempt in range(retries):
@@ -66,13 +84,17 @@ def safe_get_json(url: str, timeout: int = 25) -> Any:
             try:
                 response = requests.get(candidate, headers=_request_headers(), timeout=timeout)
                 if response.status_code == 200:
+                    _trace(f"attempt {attempt+1}: 200 {candidate}")
                     return response.json()
                 if response.status_code in (403, 429, 500, 502, 503, 504):
                     should_backoff = True
+                    _trace(f"attempt {attempt+1}: {response.status_code} {candidate}")
                     last_error = RuntimeError(f"HTTP {response.status_code} for {candidate}")
                     continue
+                _trace(f"attempt {attempt+1}: {response.status_code} {candidate}")
                 response.raise_for_status()
             except Exception as exc:
+                _trace(f"attempt {attempt+1}: error {candidate} -> {exc}")
                 last_error = exc
                 continue
         if should_backoff and attempt < retries - 1:
